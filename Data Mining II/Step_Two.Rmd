@@ -1,0 +1,954 @@
+---
+title: "Progress Report Data Mining II"
+author: "Allen Rahrooh"
+date: \today
+output: pdf_document
+toc: true
+toc_depth: 3
+---
+```{r}
+library(readxl)
+library(dplyr)
+decisionplot <- function(model, data, class = NULL, predict_type = "class",
+  resolution = 100, showgrid = TRUE, ...) {
+
+  if(!is.null(class)) cl <- data[,class] else cl <- 1
+  data <- data[,1:2]
+  k <- length(unique(cl))
+
+  plot(data, col = as.integer(cl)+1L, pch = as.integer(cl)+1L, ...)
+
+  # make grid
+  r <- sapply(data, range, na.rm = TRUE)
+  xs <- seq(r[1,1], r[2,1], length.out = resolution)
+  ys <- seq(r[1,2], r[2,2], length.out = resolution)
+  g <- cbind(rep(xs, each=resolution), rep(ys, time = resolution))
+  colnames(g) <- colnames(r)
+  g <- as.data.frame(g)
+
+  ### guess how to get class labels from predict
+  ### (unfortunately not very consistent between models)
+  p <- predict(model, g, type = predict_type)
+  if(is.list(p)) p <- p$class
+  p <- as.factor(p)
+
+  if(showgrid) points(g, col = as.integer(p)+1L, pch = ".")
+
+  z <- matrix(as.integer(p), nrow = resolution, byrow = TRUE)
+  contour(xs, ys, z, add = TRUE, drawlabels = FALSE,
+    lwd = 2, levels = (1:(k-1))+.5)
+
+  invisible(z)
+}
+
+
+credit_card_data <- read_excel("credit_card data.xls")
+
+#cleaning data
+colnames(credit_card_data)[25] <- "default_payment"
+
+set.seed(400)
+
+credit_card_data_new <- dplyr::select(credit_card_data, -one_of('ID','AGE','EDUCATION',
+                                                         'BILL_AMT1','BILL_AMT2',
+                                                         'BILL_AMT3','BILL_AMT4',
+                                                         'BILL_AMT5','BILL_AMT6'))
+
+#scaling data 
+
+credit_card_data_new[,-16] <- scale(credit_card_data_new[,-16])
+
+
+index <- sample(seq(1,2), size = nrow(credit_card_data_new), 
+                replace = TRUE, prob = c(0.75, 0.25))
+
+#creating training data set by selecting the output row values
+train <- credit_card_data_new[index == 1,]
+
+#creating test data set by not selecting the output row values
+test <- credit_card_data_new[index == 2,]
+
+
+train <- as.data.frame(train[, c("PAY_3", "PAY_4", "default_payment")])
+
+train$default_payment <- as.factor(train$default_payment)
+
+
+#took two highly correlated features with all instances
+#could not get the boosted linear model one to work
+library(e1071)
+library(randomForest)
+library(plyr)
+library(caret)
+library(mboost)
+library(nnet)
+library(MASS)
+
+
+library(plyr)
+library(caret)
+library(mboost)
+#this is with all the predictors
+set.seed(400)
+
+model.lr <- glm(default_payment ~., data = train, family = binomial(link = "logit"))
+class(model.lr) <- c("lr", class(model.lr))
+predict.lr <- function(object, newdata, ...)
+  predict.glm(object, newdata, type = "response") > .5
+
+decisionplot(model.lr, train, class = "default_payment", main = "Logistic Regression Decision Boundary")
+
+model.rf <- randomForest(default_payment ~ ., data=train)
+decisionplot(model.rf, train, class = "default_payment", main = "Random Forest Decision Boundary")
+
+model.nn <- nnet(default_payment ~. , data = train, size = 1, maxit = 1000, trace = FALSE)
+decisionplot(model.nn, train, class = "default_payment", main = "Neural Network Decision Boundary")
+
+model.nb  <- naiveBayes(default_payment ~ ., data=train)
+decisionplot(model.nb, train, class = "default_payment", main = "Naive Bayes Decision Boundary")
+
+lda.fit <- lda(default_payment ~ ., data=train)
+decisionplot(lda.fit, train, class = "default_payment", main = "Linear Discriminant Analysis")
+
+```
+
+#Data Description 
+
+The data set I decided to use is from the University of California Machine Learning Repository. The data 
+consists of credit card data from Taiwan clients with 30,000 instances. There is a total of 23 predictors, which are as follows in order from left to right: Amount of given credit (credit limit), Gender (1 = male, 2 = female), Education (1 = graduate school, 2 = university, 3 = high school, 4 = others), Martial status (1 = married, 2 = single, 3 = others), Age (year), predictors six through eleven are history of past payment based on monthly payment records (April to September 2005) with feature six being the repayment status for September 2005, feature seven being repayment status for August 2005, predictor eight being the repayment status for July 2005, and going down to April 2005 for predictor eleven. The levels given for the repayment status was: -2 (no consumption), -1 (pay duty), 1 (payment delay for one month), 2 (payment delay for two months), $\cdots$ 8 (payment delay for eight months), and 9 (payment delay for nine months and above), predictors twelve to seventeen being the amount of bill statement with the same pattern as predictors six through eleven (April to September 2005), and predictors eighteen to twenty three being the amount of previous payment with the same pattern as features twelve to seventeen (April to September 2005). The binary response variable has two levels: 0 being not making a default payment and 1 being making a default payment. The goal is to predict the probability that a credit card client will be able to make a default payment for the next billing period given the 23 predictors. 
+
+#Problems
+
+The main problem with this data set is having some predictors as categorical: gender, education, martial status, and history of past payment and then the others being numerical both continuous and discrete. To address this issue I will use variable selection to determine which categorical and numerical predictors to get high performance metrics.  
+
+#Methods
+
+```{r Import Data, message=FALSE, warning=FALSE}
+#importing dataset 
+library(readxl)
+library(knitr)
+library(tidyverse)
+library(ggplot2)
+library(mice)
+library(lattice)
+library(reshape2)
+library(DataExplorer)
+library(dplyr)
+library(plyr)
+
+credit_card_data <- read_excel("credit_card data.xls")
+
+#cleaning data
+colnames(credit_card_data)[25] <- "default_payment"
+
+#count(credit_card_data$default_payment)
+
+response_credit <- data.frame(
+  binary = factor(c("0", "1"), levels = c("0", "1")), 
+  Default = c(23364, 6636)
+)
+
+ggplot(data = response_credit, aes(x = binary, y = Default, fill = binary)) + 
+  geom_bar(colour = "black", stat = "identity") +
+  guides(fill = FALSE) + 
+  xlab("Levels") + ylab("Frequency") + 
+  ggtitle("Default Payment Frequency")
+
+
+```
+
+
+
+##Missing Values
+
+Before conducting the regression analysis I check for missing values using the Amelia package and missmap function. 
+```{r message=FALSE, warning=FALSE}
+library(Amelia)
+
+missmap(credit_card_data)
+```
+We see there are no missing values within the dataset and can now move to regression analysis. 
+
+##Regression Analysis
+I fit a linear regression on the data with all the predictors to see the $R^2$ value.
+```{r Linear Regression }
+linear_reg <- lm(default_payment ~., data = credit_card_data)
+summary(linear_reg)
+```
+
+
+We see an $R^2$ value of: 0.1233, which indicates that regression is not the optimal approach for this dataset and we will investigate doing a classification analysis instead. 
+
+##Variable Selection
+
+We now run a correlation plot for variable selection and remove the variables with low correlation. 
+```{r Feature Selection, message=FALSE, warning=FALSE}
+plot_correlation(na.omit(credit_card_data), maxcat = 5L)
+```
+From the correlation plot we see that we can omit the 
+following predictors with low correlation: 
+
+ID, AGE, BILL_AMT1, BILL_AMT2, BILL_AMT3, BILL_AMT4, BILL_AMT5, and BILL_AMT6
+
+So from 23 predictors we get 15. After variable selection I did a training test split of 75/25 for the classification analysis. 
+
+
+##Classification Models
+
+For the models I decided to do a supervised learning approach doing a classification analysis. 
+I will apply the following classification models: Boosted Generalized Linear Model, Logistic Regression, and Random Forest. 
+The generalized boosted linear model uses the boosting algorithm that uses the weak predictors to "boost" the model performance. The logistic regression model uses the logistic function to model the binary response variable so it is optimal for this dataset since the response variable is binary. The random forest model uses multiple decision trees to determine a majority vote for prediction, and is optimal for this dataset since most of the predictors are catergorical. 
+
+#Results
+
+
+##Boosted Generalized Linear Model
+
+```{r include=FALSE}
+#omitting weakly correlated predictors
+set.seed(400)
+
+credit_card_data_new <- dplyr::select(credit_card_data, -one_of('ID','AGE','EDUCATION',
+                                                         'BILL_AMT1','BILL_AMT2',
+                                                         'BILL_AMT3','BILL_AMT4',
+                                                         'BILL_AMT5','BILL_AMT6'))
+
+#scaling data 
+
+credit_card_data_new[,-16] <- scale(credit_card_data_new[,-16])
+
+
+index <- sample(seq(1,2), size = nrow(credit_card_data_new), 
+                replace = TRUE, prob = c(0.75, 0.25))
+
+#creating training data set by selecting the output row values
+train <- credit_card_data_new[index == 1,]
+
+#creating test data set by not selecting the output row values
+test <- credit_card_data_new[index == 2,]
+```
+
+```{r Boosted Generalized Linear, message=FALSE, warning=FALSE}
+library(plyr)
+library(caret)
+library(mboost)
+#this is with all the predictors
+set.seed(400)
+glm.fit <- train(default_payment ~., data = train, method = "glmboost")
+glm.pred <- predict(glm.fit, newdata = test)
+glm.pred.rule <- ifelse(glm.pred > 0.5, 1, 0)
+test <- t(test$default_payment)
+glm.pred.rule <- as.factor(glm.pred.rule)
+test <- as.factor(test)
+confusionMatrix(glm.pred.rule,test)
+
+
+```
+
+```{r Boosted Linear Model ROC, message=FALSE, warning=FALSE}
+boost.predrocr <- as.numeric(as.character(glm.pred.rule))
+boost.testrocr <- as.numeric(as.character(test))
+
+#detach(package:neuralnet, unload = T)
+
+library(ROCR)
+
+boost_pred <- prediction(boost.predrocr, boost.testrocr)
+
+plot(performance(boost_pred, measure = 'tpr', x.measure = 'fpr'), 
+     col = 2, lwd = 2, main = "Boosted GLM ROC Curve")
+
+abline(a=0, b= 1, lty = 5, col = 4)
+abline(v = 0.5, lty = 3)
+abline(h = 0.7, lty = 3)
+abline(h = 0.9, lty = 3)
+
+auc_ROCR_boost <- performance(boost_pred, measure = "auc")
+auc_ROCR_boost@y.values[[1]]*100
+
+```
+We see an accuracy of 78.7% which is expected since the regular linear regression model had a low $R^2$. 
+Also we so the Receiver Operating Characteristic (ROC) curve with an Area Under the Curve (AUC) at around 50% which is low since the highest value is 100%. 
+
+
+```{r include=FALSE}
+#omitting weakly correlated predictors
+
+set.seed(400)
+credit_card_data_new <- dplyr::select(credit_card_data, -one_of('ID','AGE','EDUCATION',
+                                                         'BILL_AMT1','BILL_AMT2',
+                                                         'BILL_AMT3','BILL_AMT4',
+                                                         'BILL_AMT5','BILL_AMT6'))
+
+#scaling data 
+
+credit_card_data_new[,-16] <- scale(credit_card_data_new[,-16])
+
+
+index <- sample(seq(1,2), size = nrow(credit_card_data_new), 
+                replace = TRUE, prob = c(0.75, 0.25))
+
+#creating training data set by selecting the output row values
+train <- credit_card_data_new[index == 1,]
+
+#creating test data set by not selecting the output row values
+test <- credit_card_data_new[index == 2,]
+```
+
+##Logistic Regression Model
+```{r Fitting a logistic regression, message=FALSE, warning=FALSE}
+
+log_model <- glm(default_payment ~., data = train, family = binomial(link = "logit"))
+summary(log_model)
+
+log_predictions <- predict(log_model, test, type="response")
+
+#assigning rule for prediction 
+log_prediction_rule <- ifelse(log_predictions > 0.5, 1, 0)
+
+#generate confusion table 
+
+test <- t(test$default_payment)
+
+log_prediction_rule <- as.factor(log_prediction_rule)
+test <- as.factor(test)
+
+confusionMatrix(log_prediction_rule,test)
+```
+
+```{r glm ROC Curve, message=FALSE, warning=FALSE}
+
+glmpredrocr <- as.numeric(as.character(log_prediction_rule))
+glmtestrocr <- as.numeric(as.character(test))
+
+library(ROCR)
+
+log_pred <- prediction(glmpredrocr, glmtestrocr)
+
+plot(performance(log_pred, measure = 'tpr', x.measure = 'fpr'), 
+     col = 2, lwd = 2, main = "Logistic Regression ROC Curve")
+abline(a=0, b= 1, lty = 5, col = 4)
+abline(v = 0.5, lty = 3)
+abline(h = 0.7, lty = 3)
+abline(h = 0.9, lty = 3)
+
+auc_ROCR_log <- performance(log_pred, measure = "auc")
+auc_ROCR_log@y.values[[1]]*100
+
+```
+We see an accuracy of 80.9% an improvement from the boosted generalized liner model. Also we see the AUC for the ROC curve improved slighty about 60%. 
+
+```{r include=FALSE}
+
+set.seed(400)
+#omitting weakly correlated predictors
+credit_card_data_new <- dplyr::select(credit_card_data, -one_of('ID','AGE','EDUCATION',
+                                                         'BILL_AMT1','BILL_AMT2',
+                                                         'BILL_AMT3','BILL_AMT4',
+                                                         'BILL_AMT5','BILL_AMT6'))
+#scaling data 
+
+credit_card_data_new[,-16] <- scale(credit_card_data_new[,-16])
+
+
+index <- sample(seq(1,2), size = nrow(credit_card_data_new), 
+                replace = TRUE, prob = c(0.75, 0.25))
+
+#creating training data set by selecting the output row values
+train <- credit_card_data_new[index == 1,]
+
+#creating test data set by not selecting the output row values
+test <- credit_card_data_new[index == 2,]
+#varImpPlot(rf, sort = T, n.var =10, main = "Top 10 - Variable Importance")
+```
+
+##Random Forest Model
+
+```{r Random Forest Model}
+library(randomForest)
+library(caret)
+
+rf <- randomForest(default_payment ~., ntree = 100, data = train)
+plot(rf, main = "Random Forest Error Per Number of Trees")
+
+print(rf)
+
+predict_rf <- predict(rf, test)
+
+rf_prediction_rule <- ifelse(predict_rf > 0.5, 1, 0)
+
+rf_prediction_rule <- as.factor(rf_prediction_rule)
+
+test <- as.factor(test$default_payment)
+
+confusionMatrix(rf_prediction_rule, test)
+```
+
+```{r Random Forest ROC Curve, eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+
+rf.predrocr <- as.numeric(as.character(rf_prediction_rule))
+rf.testrocr <- as.numeric(as.character(test))
+
+library(ROCR)
+rf_pred <- prediction(rf.predrocr, rf.testrocr)
+plot(performance(rf_pred, measure = 'tpr', x.measure = 'fpr'), 
+     col = 2, lwd = 2, main = "Random Forest ROC Curve")
+abline(a=0, b= 1, lty = 5, col = 4)
+abline(v = 0.5, lty = 3)
+abline(h = 0.7, lty = 3)
+abline(h = 0.9, lty = 3)
+
+auc_ROCR_RF <- performance(rf_pred, measure = "auc")
+auc_ROCR_RF@y.values[[1]]*100
+
+
+```
+We see an accuracy of 81% an improvement from the logistic regression model. Also we see the AUC for the ROC curve improved over the logistic regression model.
+
+
+##Neural Network
+```{r include=FALSE}
+#omitting weakly correlated predictors
+set.seed(400)
+
+credit_card_data_new <- dplyr::select(credit_card_data, -one_of('ID','AGE','EDUCATION',
+                                                         'BILL_AMT1','BILL_AMT2',
+                                                         'BILL_AMT3','BILL_AMT4',
+                                                         'BILL_AMT5','BILL_AMT6'))
+
+#scaling data 
+
+credit_card_data_new[,-16] <- scale(credit_card_data_new[,-16])
+
+
+index <- sample(seq(1,2), size = nrow(credit_card_data_new), 
+                replace = TRUE, prob = c(0.75, 0.25))
+
+#creating training data set by selecting the output row values
+train <- credit_card_data_new[index == 1,]
+
+#creating test data set by not selecting the output row values
+test <- credit_card_data_new[index == 2,]
+```
+
+
+```{r Neural Network}
+
+library(neuralnet)
+library(caret)
+
+nn <- neuralnet(default_payment ~., data = train, hidden = 2, linear.output = FALSE, threshold = 0.01)
+
+plot(nn)
+
+predict_nn <- predict(nn, test)
+
+nn_prediction_rule <- ifelse(predict_nn > 0.5, 1, 0)
+
+nn_prediction_rule <- as.factor(nn_prediction_rule)
+
+test <- as.factor(test$default_payment)
+
+confusionMatrix(nn_prediction_rule, test)
+
+
+```
+
+```{r ROC Curve Neural}
+test <- credit_card_data_new[index == 2,]
+
+prob <- neuralnet::compute(nn, test[, -ncol(test)] )
+prob.result <- prob$net.result
+
+detach(package:neuralnet, unload = T)
+
+library(ROCR)
+
+nn_pred <- prediction(prob.result, test$default_payment)
+plot(performance(nn_pred, measure = 'tpr', x.measure = 'fpr'), 
+     col = 2, lwd = 2, main = "Neural Networks ROC Curve")
+abline(a=0, b= 1, lty = 5, col = 4)
+abline(v = 0.5, lty = 3)
+abline(h = 0.7, lty = 3)
+abline(h = 0.9, lty = 3)
+
+auc_ROCR_nn <- performance(nn_pred, measure = "auc")
+auc_ROCR_nn@y.values[[1]]*100
+```
+
+##Naive Bayes
+
+```{r include=FALSE}
+#omitting weakly correlated predictors
+set.seed(100)
+
+credit_card_data_new <- dplyr::select(credit_card_data, -one_of('ID','AGE','EDUCATION',
+                                                         'BILL_AMT1','BILL_AMT2',
+                                                         'BILL_AMT3','BILL_AMT4',
+                                                         'BILL_AMT5','BILL_AMT6'))
+
+#scaling data 
+
+credit_card_data_new[,-16] <- scale(credit_card_data_new[,-16])
+
+
+index <- sample(seq(1,2), size = nrow(credit_card_data_new), 
+                replace = TRUE, prob = c(0.75, 0.25))
+
+#creating training data set by selecting the output row values
+train <- credit_card_data_new[index == 1,]
+
+#creating test data set by not selecting the output row values
+test <- credit_card_data_new[index == 2,]
+```
+
+```{r Naive Bayes}
+library(ElemStatLearn)
+library(e1071)
+library(ROCR)
+library(dplyr)
+library(ggplot2)
+library(scales)
+
+
+yTest <- as.factor(test$default_payment)
+
+model.nb <- naiveBayes(as.factor(default_payment) ~. , data = train)
+
+nb.predict <- predict(model.nb, test[,-16])
+
+confusionMatrix(nb.predict,yTest)
+
+```
+
+```{r ROC Curve NB}
+probs <- predict(model.nb, test[,1:15], type="raw")
+pred <- prediction(probs[, "1"], yTest)
+
+plot(performance(pred, measure = 'tpr', x.measure = 'fpr'), 
+     col = 2, lwd = 2, main = "Naive Bayes ROC Curve")
+
+abline(a=0, b= 1, lty = 5, col = 4)
+abline(v = 0.5, lty = 3)
+abline(h = 0.7, lty = 3)
+abline(h = 0.9, lty = 3)
+
+auc_ROCR_boost <- performance(pred, measure = "auc")
+auc_ROCR_boost@y.values[[1]]*100
+
+
+```
+
+##Linear Discriminant Analysis 
+```{r include=FALSE}
+#omitting weakly correlated predictors
+set.seed(400)
+
+credit_card_data_new <- dplyr::select(credit_card_data, -one_of('ID','AGE','EDUCATION',
+                                                         'BILL_AMT1','BILL_AMT2',
+                                                         'BILL_AMT3','BILL_AMT4',
+                                                         'BILL_AMT5','BILL_AMT6'))
+
+#scaling data 
+
+credit_card_data_new[,-16] <- scale(credit_card_data_new[,-16])
+
+
+index <- sample(seq(1,2), size = nrow(credit_card_data_new), 
+                replace = TRUE, prob = c(0.75, 0.25))
+
+#creating training data set by selecting the output row values
+train <- credit_card_data_new[index == 1,]
+
+#creating test data set by not selecting the output row values
+test <- credit_card_data_new[index == 2,]
+```
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+
+lda.fit <- lda(default_payment ~.,  data = train)
+
+lda.test <- predict(lda.fit, newdata = test)
+
+test$default_payment <- as.factor(test$default_payment)
+
+confusionMatrix(test$default_payment, lda.test$class)
+
+
+library(ROCR)
+
+pb <- lda.test$posterior
+pb <- as.data.frame(pb)
+pred.LDA <- data.frame(test$default_payment, pb$`1`)
+colnames(pred.LDA) <- c("target", "score")
+lift.LDA <- lift(target ~ score, data = pred.LDA, cuts=10, class="1")
+xyplot(lift.LDA, main="LDA - Lift Chart", type=c("l","g"), lwd=2
+       , scales=list(x=list(alternating=FALSE,tick.number = 10)
+                     ,y=list(alternating=FALSE,tick.number = 10)))
+
+library(AUC)
+
+labels <- as.factor(ifelse(pred.LDA$target=="1", 1, 0))
+predictions <- pred.LDA$score
+auc(roc(predictions, labels), min = 0, max = 1)
+
+roc <- roc(predictions, labels)
+
+plot(roc, min=0, max=1, main="LDA ROC Curve", col = "red")
+```
+
+#stepAIC
+
+```{r applying stepAIC}
+library(MASS)
+linear_reg <- lm(default_payment ~., data = credit_card_data)
+summary(linear_reg)
+
+step_model <- stepAIC(linear_reg, direction = "both", trace = FALSE)
+step_model <- model.matrix(step_model)
+step_model <- as.data.frame(step_model)
+default_payment <- credit_card_data$default_payment 
+step_model <- step_model[,2:16]
+step_model <- cbind(step_model, default_payment)
+
+#now ready for classification 
+
+```
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+#scaling data 
+set.seed(400)
+step_model[,-16] <- scale(step_model[,-16])
+
+
+index <- sample(seq(1,2), size = nrow(step_model), 
+                replace = TRUE, prob = c(0.75, 0.25))
+
+#creating training data set by selecting the output row values
+train <- step_model[index == 1,]
+
+#creating test data set by not selecting the output row values
+test <- step_model[index == 2,]
+```
+
+##Boosted Generalized Linear Model
+```{r Boosted Generalized Linear Model, message=FALSE, warning=FALSE}
+library(plyr)
+library(caret)
+library(mboost)
+
+#this is with all the predictors 
+
+set.seed(400)
+
+boost.fit <- train(default_payment ~., data = train, method = "glmboost")
+
+boost.pred <- predict(boost.fit, test[,-16])
+boost.pred.rule <- ifelse(boost.pred > 0.5, 1, 0)
+
+test <- t(test$default_payment)
+
+boost.pred.rule <- as.factor(boost.pred.rule)
+test <- as.factor(test)
+
+confusionMatrix(boost.pred.rule,test)
+```
+
+```{r Boosted Linear Model ROC Curve, message=FALSE, warning=FALSE}
+boost.predrocr <- as.numeric(as.character(boost.pred.rule))
+boost.testrocr <- as.numeric(as.character(test))
+
+library(ROCR)
+
+boost_pred <- prediction(boost.predrocr, boost.testrocr)
+
+plot(performance(boost_pred, measure = 'tpr', x.measure = 'fpr'), 
+     col = 2, lwd = 2, main = "Boosted GLM ROC Curve")
+
+abline(a=0, b= 1, lty = 5, col = 4)
+abline(v = 0.5, lty = 3)
+abline(h = 0.7, lty = 3)
+abline(h = 0.9, lty = 3)
+
+auc_ROCR_boost <- performance(boost_pred, measure = "auc")
+auc_ROCR_boost@y.values[[1]]*100
+
+```
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+#scaling data 
+set.seed(400)
+step_model[,-16] <- scale(step_model[,-16])
+
+
+index <- sample(seq(1,2), size = nrow(step_model), 
+                replace = TRUE, prob = c(0.75, 0.25))
+
+#creating training data set by selecting the output row values
+train <- step_model[index == 1,]
+
+#creating test data set by not selecting the output row values
+test <- step_model[index == 2,]
+```
+
+##Logistic Regression
+```{r Fitting a logistic regression model, message=FALSE, warning=FALSE}
+
+log_model <- glm(default_payment ~., data = train, family = binomial(link = "logit"))
+summary(log_model)
+
+log_predictions <- predict(log_model, test, type="response")
+
+#assigning rule for prediction 
+log_prediction_rule <- ifelse(log_predictions > 0.5, 1, 0)
+
+#generate confusion table 
+
+test <- t(test$default_payment)
+
+log_prediction_rule <- as.factor(log_prediction_rule)
+test <- as.factor(test)
+
+confusionMatrix(log_prediction_rule,test)
+```
+
+```{r ROC Curve, message=FALSE, warning=FALSE}
+
+glmpredrocr <- as.numeric(as.character(log_prediction_rule))
+glmtestrocr <- as.numeric(as.character(test))
+
+library(ROCR)
+
+log_pred <- prediction(glmpredrocr, glmtestrocr)
+
+plot(performance(log_pred, measure = 'tpr', x.measure = 'fpr'), 
+     col = 2, lwd = 2, main = "Logistic Regression ROC Curve")
+abline(a=0, b= 1, lty = 5, col = 4)
+abline(v = 0.5, lty = 3)
+abline(h = 0.7, lty = 3)
+abline(h = 0.9, lty = 3)
+
+auc_ROCR_log <- performance(log_pred, measure = "auc")
+auc_ROCR_log@y.values[[1]]*100
+
+```
+
+##Random Forest
+```{r message=FALSE, warning=FALSE, include=FALSE}
+set.seed(400)
+
+step_model[,-16] <- scale(step_model[,-16])
+
+
+index <- sample(seq(1,2), size = nrow(step_model), 
+                replace = TRUE, prob = c(0.75, 0.25))
+
+#creating training data set by selecting the output row values
+train <- step_model[index == 1,]
+
+#creating test data set by not selecting the output row values
+test <- step_model[index == 2,]
+```
+
+
+```{r random forest stepAIC, message=FALSE, warning=FALSE}
+library(randomForest)
+library(caret)
+
+set.seed(400)
+
+rf <- randomForest(default_payment ~., ntree = 100, data = train)
+plot(rf, main = "Random Forest Error Per Number of Trees")
+
+print(rf)
+
+predict_rf <- predict(rf, test)
+
+rf_prediction_rule <- ifelse(predict_rf > 0.5, 1, 0)
+
+rf_prediction_rule <- as.factor(rf_prediction_rule)
+
+test <- as.factor(test$default_payment)
+
+confusionMatrix(rf_prediction_rule, test)
+```
+
+```{r ROC Random Forest, message=FALSE, warning=FALSE}
+
+rf.predrocr <- as.numeric(as.character(rf_prediction_rule))
+rf.testrocr <- as.numeric(as.character(test))
+
+library(ROCR)
+rf_pred <- prediction(rf.predrocr, rf.testrocr)
+plot(performance(rf_pred, measure = 'tpr', x.measure = 'fpr'), 
+     col = 2, lwd = 2, main = "Random Forest ROC Curve")
+abline(a=0, b= 1, lty = 5, col = 4)
+abline(v = 0.5, lty = 3)
+abline(h = 0.7, lty = 3)
+abline(h = 0.9, lty = 3)
+
+auc_ROCR_RF <- performance(rf_pred, measure = "auc")
+auc_ROCR_RF@y.values[[1]]*100
+
+```
+
+##Neural Network
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+set.seed(400)
+
+step_model[,-16] <- scale(step_model[,-16])
+
+
+index <- sample(seq(1,2), size = nrow(step_model), 
+                replace = TRUE, prob = c(0.75, 0.25))
+
+#creating training data set by selecting the output row values
+train <- step_model[index == 1,]
+
+#creating test data set by not selecting the output row values
+test <- step_model[index == 2,]
+```
+
+
+```{r Neural Network stepAIC, message=FALSE, warning=FALSE}
+
+library(neuralnet)
+library(caret)
+
+nn <- neuralnet(default_payment ~., data = train, hidden = 2, linear.output = FALSE, threshold = 0.01)
+
+plot(nn)
+
+predict_nn <- predict(nn, test)
+
+nn_prediction_rule <- ifelse(predict_nn > 0.5, 1, 0)
+
+nn_prediction_rule <- as.factor(nn_prediction_rule)
+
+test <- as.factor(test$default_payment)
+
+confusionMatrix(nn_prediction_rule, test)
+```
+
+```{r ROC Curve Neural Networks}
+test <- step_model[index == 2,]
+
+prob <- neuralnet::compute(nn, test[,-ncol(test)])
+prob.result <- prob$net.result
+
+detach(package:neuralnet, unload = T)
+
+library(ROCR)
+nn_pred <- prediction(prob.result, test$default_payment)
+plot(performance(nn_pred, measure = 'tpr', x.measure = 'fpr'), 
+     col = 2, lwd = 2, main = "Neural Networks ROC Curve")
+abline(a=0, b= 1, lty = 5, col = 4)
+abline(v = 0.5, lty = 3)
+abline(h = 0.7, lty = 3)
+abline(h = 0.9, lty = 3)
+
+auc_ROCR_nn <- performance(nn_pred, measure = "auc")
+auc_ROCR_nn@y.values[[1]]*100
+```
+
+##Naive Bayes
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+set.seed(400)
+
+
+index <- sample(seq(1,2), size = nrow(step_model), 
+                replace = TRUE, prob = c(0.75, 0.25))
+
+#creating training data set by selecting the output row values
+train <- step_model[index == 1,]
+
+#creating test data set by not selecting the output row values
+test <- step_model[index == 2,]
+```
+
+```{r Naive Bayes step}
+library(ElemStatLearn)
+library(e1071)
+library(ROCR)
+library(dplyr)
+library(ggplot2)
+library(scales)
+
+
+
+
+model.nb <- naiveBayes(as.factor(default_payment) ~. , data = train)
+
+nb.predict <- predict(model.nb, test[,-16])
+
+test$default_payment <- as.factor(test$default_payment)
+
+confusionMatrix(nb.predict,test$default_payment)
+```
+
+```{r ROC Curve Naive Bayes Step}
+probs <- predict(model.nb, test[,1:15], type="raw")
+pred <- prediction(probs[, "1"], test$default_payment)
+
+plot(performance(pred, measure = 'tpr', x.measure = 'fpr'), 
+     col = 2, lwd = 2, main = "Naive Bayes ROC Curve")
+
+abline(a=0, b= 1, lty = 5, col = 4)
+abline(v = 0.5, lty = 3)
+abline(h = 0.7, lty = 3)
+abline(h = 0.9, lty = 3)
+
+auc_ROCR_boost <- performance(pred, measure = "auc")
+auc_ROCR_boost@y.values[[1]]*100
+
+```
+
+##Linear Discriminant Analysis 
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+set.seed(400)
+
+
+index <- sample(seq(1,2), size = nrow(step_model), 
+                replace = TRUE, prob = c(0.75, 0.25))
+
+#creating training data set by selecting the output row values
+train <- step_model[index == 1,]
+
+#creating test data set by not selecting the output row values
+test <- step_model[index == 2,]
+```
+
+```{r eval=FALSE, include=FALSE}
+
+lda.fit <- MASS::lda(default_payment ~.,  data = train)
+
+lda.test <- predict(lda.fit, newdata = test)
+
+test$default_payment <- as.factor(test$default_payment)
+
+confusionMatrix(test$default_payment, lda.test$class)
+
+
+library(ROCR)
+
+pb <- lda.test$posterior
+pb <- as.data.frame(pb)
+pred.LDA <- data.frame(test$default_payment, pb$`1`)
+colnames(pred.LDA) <- c("target", "score")
+lift.LDA <- lift(target ~ score, data = pred.LDA, cuts=10, class="1")
+xyplot(lift.LDA, main="LDA - Lift Chart", type=c("l","g"), lwd=2
+       , scales=list(x=list(alternating=FALSE,tick.number = 10)
+                     ,y=list(alternating=FALSE,tick.number = 10)))
+
+library(AUC)
+
+labels <- as.factor(ifelse(pred.LDA$target=="1", 1, 0))
+predictions <- pred.LDA$score
+auc(roc(predictions, labels), min = 0, max = 1)
+
+roc <- roc(predictions, labels)
+
+plot(roc, min=0, max=1, main="LDA - ROC Curve", col = "red")
+```
